@@ -1,0 +1,11 @@
+{
+  "name": "kora-agente",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Agente contable Kotic: app propia con Firebase",
+  "scripts": {
+    "build": "python3 tools/build.py && esbuild src/kora-shim.js --bundle --format=esm --minify --target=es2020 --outfile=kora.js"
+  },
+  "dependencies": { "firebase": "12.19.0" },
+  "devDependencies": { "esbuild": "0.25.10" }
+}

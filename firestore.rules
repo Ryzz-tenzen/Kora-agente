@@ -1,0 +1,81 @@
+rules_version = '2';
+// Reglas del agente contable.
+// Cada libro vive en libros/{libro}. El dueño es admin; los demás entran por invitación (correo) con un rol:
+//   admin · contador → todo el libro (el equipo y los roles solo los cambia el dueño)
+//   taquilla         → boletería, puerta, cajas y los asientos que eso genera
+//   barra            → inventario, productos, cajas y los asientos que eso genera
+//   lector           → solo lee
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function email() { return request.auth.token.email != null ? request.auth.token.email.lower() : ''; }
+    function libro(lib) { return get(/databases/$(database)/documents/libros/$(lib)).data; }
+    function equipo(lib) { return get(/databases/$(database)/documents/libros/$(lib)/config/equipo).data; }
+    function esDueno(lib) { return signedIn() && libro(lib).owner == request.auth.uid; }
+    function rol(lib) {
+      let eq = equipo(lib);
+      let roles = eq.get('roles', {});
+      let inv = eq.get('invitados', {});
+      return esDueno(lib) ? 'admin'
+        : (request.auth.uid in roles ? roles[request.auth.uid]
+        : (email() in inv ? inv[email()] : 'nadie'));
+    }
+    function miembro(lib) { return signedIn() && (esDueno(lib) || rol(lib) in ['admin', 'contador', 'taquilla', 'barra', 'lector']); }
+    function gestor(lib) { return signedIn() && (esDueno(lib) || rol(lib) in ['admin', 'contador']); }
+    function escribe(lib, roles) { return signedIn() && (esDueno(lib) || rol(lib) in roles); }
+
+    // El documento del libro: lo crea quien será su dueño; lo lee quien tenga acceso; lo cambia solo el dueño.
+    match /libros/{lib} {
+      allow read: if signedIn() && (resource.data.owner == request.auth.uid || email() in resource.data.get('acceso', []));
+      allow create: if signedIn() && request.resource.data.owner == request.auth.uid
+                    && request.resource.data.acceso is list && request.resource.data.acceso.size() <= 200;
+      allow update: if signedIn() && resource.data.owner == request.auth.uid && request.resource.data.owner == resource.data.owner;
+      allow delete: if false;
+
+      // Equipo y configuración: el dueño. Al crear el libro, el dueño escribe su propio equipo.
+      match /config/{doc} {
+        allow read: if miembro(lib);
+        allow write: if esDueno(lib);
+      }
+      // Cada persona registra su propia ficha (última vez que entró). Los gestores ven el listado.
+      match /miembros/{uid} {
+        allow read: if gestor(lib) || (signedIn() && request.auth.uid == uid);
+        allow write: if signedIn() && request.auth.uid == uid && miembro(lib);
+      }
+      match /proveedores/{id} {
+        allow read: if miembro(lib);
+        allow write: if gestor(lib);
+      }
+      match /respaldo/{id} {
+        allow read: if miembro(lib);
+        allow write: if gestor(lib);
+      }
+      match /soportes/{id} {
+        allow read: if miembro(lib);
+        allow create: if escribe(lib, ['admin', 'contador', 'taquilla', 'barra']) && request.resource.data.data is string && request.resource.data.data.size() < 1000000;
+        allow update, delete: if gestor(lib);
+      }
+
+      match /eventos/{ev} {
+        allow read: if miembro(lib);
+        allow write: if gestor(lib);
+
+        // Lo que registra cada rol operativo.
+        match /asientos/{id}      { allow read: if miembro(lib); allow create, update: if escribe(lib, ['admin', 'contador', 'taquilla', 'barra']); allow delete: if gestor(lib); }
+        match /historial/{id}     { allow read: if miembro(lib); allow create: if escribe(lib, ['admin', 'contador', 'taquilla', 'barra']); allow update, delete: if gestor(lib); }
+        match /meta/{id}          { allow read: if miembro(lib); allow write: if escribe(lib, ['admin', 'contador', 'taquilla', 'barra']); }
+        match /cajas/{id}         { allow read: if miembro(lib); allow write: if escribe(lib, ['admin', 'contador', 'taquilla', 'barra']); }
+        match /liquidaciones/{id} { allow read: if miembro(lib); allow write: if escribe(lib, ['admin', 'contador', 'taquilla']); }
+        match /ingresos/{id}      { allow read: if miembro(lib); allow write: if escribe(lib, ['admin', 'contador', 'taquilla']); }
+        match /inventario/{id}    { allow read: if miembro(lib); allow write: if escribe(lib, ['admin', 'contador', 'barra']); }
+        match /productos/{id}     { allow read: if miembro(lib); allow write: if escribe(lib, ['admin', 'contador', 'barra']); }
+        // Todo lo demás del evento (puntos, personal, socios, repartos, patrocinios, compromisos…): administración.
+        match /{col}/{id} {
+          allow read: if miembro(lib);
+          allow write: if gestor(lib) && !(col in ['asientos', 'historial', 'meta', 'cajas', 'liquidaciones', 'ingresos', 'inventario', 'productos']);
+        }
+      }
+    }
+  }
+}
